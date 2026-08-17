@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# DuckDB gecici/spill dosyalari (cok buyuk olabilir, asla depoya girmemeli)
+.tmp/
+**/.tmp/
+*.duckdb
+*.duckdb.wal
+
+# Claude Code yerel ayarlari (makineye ozel)
+.claude/settings.local.json
+
+# Buyuk/sentetik test ve ornek veri dosyalari (repo disi tutulur, gerekirse
+# make_sample_data.py / gen_*.py ile yeniden uretilebilir)
+dashboard/sample_uap2040_style_data.csv
+*.csv
+!dashboard/utils/data/*.csv
+
+# İşletim sistemi / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Ortam / gizli anahtarlar
+.env
+*.env
