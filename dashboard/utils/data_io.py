@@ -346,10 +346,35 @@ def get_or_build(path: str, force_rebuild: bool = False) -> DataSource:
 
 def materialize_upload(uploaded_file) -> str:
     """Streamlit file_uploader nesnesini diske yazip yolunu dondurur
-    (boylece geri kalan tum boru hatti dosya-yolu tabanli calisabilir)."""
+    (boylece geri kalan tum boru hatti dosya-yolu tabanli calisabilir).
+
+    DOGRULUK ICIN KRITIK (gercek bir bulut dagitiminda olculup dogrulandi):
+    onbellek dosyasinin GERCEKTEN tamamlanmis/dogru bir yazma oldugu
+    kontrol edilmeden yeniden kullaniliyordu - sadece dosya ADI + ILK
+    2048 BAYTININ ozetine gore bir onbellek anahtari uretilip, o yol
+    zaten VARSA icerigi asla dogrulanmadan (boyut bile kontrol edilmeden)
+    dogrudan geri donduruluyordu. Eger daha once (orn. sunucu konteyneri
+    baska bir sebeple - bellek asimi, aglantim kesilmesi vb. - yeniden
+    baslarken) bu dosyaya YARIM/KESIK bir yazma olmussa, o BOZUK kopya
+    SONSUZA KADAR sessizce yeniden kullaniliyordu - kullaniciya HICBIR
+    uyari verilmeden CSV'nin sadece bir kismi (orn. 5.701 sutun yerine
+    22 sutun) islenmis gibi goruniyordu. Artik onbellek anahtarina
+    GERCEK dosya boyutu da katiliyor VE mevcut dosyanin diskteki boyutu
+    beklenenle (uploaded_file.size) birebir karsilastiriliyor - uyusmazsa
+    (yarim/bozuk kalmis onbellek) dosya SIFIRDAN yeniden yazilir."""
     safe_name = "".join(c for c in uploaded_file.name if c.isalnum() or c in "._-") or "upload.csv"
-    tmp_path = CACHE_DIR / f"upload_{hashlib.sha1(uploaded_file.getvalue()[:2048]).hexdigest()[:12]}_{safe_name}"
-    if not tmp_path.exists():
+    expected_size = uploaded_file.size
+    tmp_path = CACHE_DIR / (
+        f"upload_{hashlib.sha1(uploaded_file.getvalue()[:2048]).hexdigest()[:12]}"
+        f"_{expected_size}_{safe_name}"
+    )
+    needs_write = True
+    if tmp_path.exists():
+        try:
+            needs_write = tmp_path.stat().st_size != expected_size
+        except OSError:
+            needs_write = True
+    if needs_write:
         with open(tmp_path, "wb") as f:
             f.write(uploaded_file.getvalue())
     return str(tmp_path)
