@@ -298,27 +298,16 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
             last_err = e
             continue
 
-    # 2b) DuckDB'nin (paralel okuyucudaki olasi tutarsizlik nedeniyle) hicbir
-    # denemede TUTARLI/DOGRU sutun sayisi uretemedigi durumlar icin - TEK IS
-    # PARCACIGIYLA (parallel=false), en yuksek olasilikli ayracla SON bir kez
-    # dene. Bu daha YAVAS olabilir ama DuckDB'nin paralel bolme mantigindaki
-    # olasi tutarsizligi devre disi birakir.
-    if likely_delim:
-        try:
-            con.execute("DROP TABLE IF EXISTS " + TABLE)
-            opt_str = (f"delim='{likely_delim}', ignore_errors=true, null_padding=true, "
-                       f"all_varchar=true, parallel=false")
-            con.execute(f"CREATE TABLE {TABLE} AS SELECT * FROM read_csv(?, {opt_str})", [path])
-            n = con.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0]
-            ncol = len(con.execute(f"DESCRIBE {TABLE}").fetchdf())
-            if n > 0 and ncol > 1 and _plausible(ncol):
-                warnings.append(
-                    f"Dosya '{likely_delim}' ayraciyla (tek is parcacigi, yavas ama guvenli mod) "
-                    f"tum sutunlar metin olarak okunarak yuklendi."
-                )
-                return warnings
-        except Exception as e:  # noqa: BLE001
-            last_err = e
+    # ONEMLI: burada BILEREK "parallel=false" ile DuckDB'yi tekrar denemiyoruz.
+    # Genis (binlerce sutunlu) dosyalarda DuckDB'nin TEK IS PARCACIGIYLA
+    # read_csv'si ~2+ SAAT surebiliyor (olculup dogrulandi) - bulut ortaminda
+    # bu, "yanlis ama hizli sonuc" yerine "hicbir zaman bitmeyen istek/zaman
+    # asimi" ile SONUCLANIRDI, ki bu DAHA KOTU bir basarisizlik turudur.
+    # Bunun yerine dogrudan asagidaki pandas yedegine geciyoruz - o da
+    # basliktan tahmin edilen GERCEK ayraci acikca kullanir (DuckDB'nin
+    # paralel bolme mantigina hic girmedigi icin ayni tutarsizlik riskini
+    # tasimaz) ve gercek dosyada ~50 SANIYEDE dogru sonucu verdigi olculup
+    # dogrulandi.
 
     # 3) Son care: pandas ile parca parca (chunk) okuyup DuckDB tablosuna
     # aktar - 'likely_delim' basliktan zaten tahmin edildiyse ACIKCA
