@@ -72,6 +72,58 @@ def _cache_key(path: str) -> str:
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
 
 
+def _detect_safe_memory_limit_mb() -> int | None:
+    """Konteynerlestirilmis (orn. Streamlit Community Cloud, Linux/cgroup)
+    ortamlarda GERCEK bellek sinirini okuyup DuckDB'ye guvenli, ACIK bir
+    ust sinir tanimlamak icin kullanilir.
+
+    DOGRULUK/KARARLILIK ICIN KRITIK (gercek bir bulut dagitiminda olculup
+    dogrulandi): bu sinir OLMADAN DuckDB, konteynerin GERCEK (kucuk)
+    sinirini GOREMEYIP host makinenin bildirdigi TAM bellegi kullanmaya
+    calisabilir. Sonuc, Python'a hicbir yakalanabilir hata firlatilmadan
+    isletim sistemi tarafindan SESSIZCE "OOM-kill" edilmek olur - bu da
+    o an baglı TUM kullanicilar icin TUM uygulamanin (paylasilan tek bir
+    konteyner oldugundan) cokmesine yol acar. Ornek: 245MB, 5700 sutunlu
+    bir dosya Streamlit Community Cloud'un ucretsiz (1GB) katmaninda
+    yuklenmeye calisildiginda konteyner tamamen coktu ("Connection failed
+    with status 503", uygulama TUM kullanicilar icin yeniden baslatilana
+    kadar erisilemez oldu).
+
+    Bu fonksiyon cgroup dosyalarindan GERCEK sinirini okuyup DuckDB'ye
+    acikca bildirir - boylece asilirsa DuckDB KENDISI (OS'ten once)
+    yakalanabilir bir `OutOfMemoryException` firlatir; bu, app.py'deki
+    mevcut `except Exception` blogu tarafindan zaten yakalanip kullaniciya
+    Turkce, anlasilir bir hata olarak gosterilir - TUM uygulama COKMEZ,
+    sadece o TEK islem basarisiz olur.
+
+    Yerel Windows/Mac gelistirme ortaminda bu cgroup dosyalari mevcut
+    DEGILDIR - bu durumda None donulur ve DuckDB'nin kendi varsayilan
+    (mevcut, onceden dogrulanmis) davranisi HICBIR SEKILDE degismez."""
+    for cgroup_path in ("/sys/fs/cgroup/memory.max",  # cgroup v2
+                        "/sys/fs/cgroup/memory/memory.limit_in_bytes"):  # cgroup v1
+        try:
+            with open(cgroup_path) as f:
+                raw = f.read().strip()
+        except OSError:
+            continue
+        if raw == "max":
+            continue
+        try:
+            limit_bytes = int(raw)
+        except ValueError:
+            continue
+        # Pratikte "sinirsiz" sayilan cok buyuk degerleri (bazi cgroup v1
+        # kurulumlarinda gorulur) yok say - gercek bir konteyner siniri
+        # degildir, DuckDB'yi gereksiz yere kisitlar.
+        if 0 < limit_bytes < 64 * 1024 ** 3:
+            # %65'i kullan - Python yorumlayicisi, Streamlit, pandas vb.
+            # icin de pay birakilir; DuckDB TEK basina konteynerin TAMAMINI
+            # kullanamaz.
+            mb = int(limit_bytes / 1024 / 1024 * 0.65)
+            return max(256, mb)
+    return None
+
+
 def _detect_encoding(path: str, sample_bytes: int = 1_000_000) -> str:
     """Dosyanin gercek kodlamasini, DuckDB'ye sormadan, dogrudan Python'un
     tam kod-sayfasi destegiyle tespit eder (DuckDB yalnizca utf-8/utf-16/
@@ -268,6 +320,9 @@ def get_or_build(path: str, force_rebuild: bool = False) -> DataSource:
     con = duckdb.connect(str(db_path))
     try:
         con.execute("PRAGMA threads=4")
+        _mem_limit_mb = _detect_safe_memory_limit_mb()
+        if _mem_limit_mb:
+            con.execute(f"PRAGMA memory_limit='{_mem_limit_mb}MB'")
         warnings = _try_ingest(con, utf8_path)
         if detected_enc:
             warnings.insert(0, f"Dosya '{detected_enc}' kodlamasi tespit edildi ve UTF-8'e cevrildi.")
@@ -312,6 +367,9 @@ def open_work_connection(db_path: str) -> duckdb.DuckDBPyConnection:
     icin CREATE VIEW kullanabiliriz; asil onbellek dosyasi hep salt-okunur
     ve bozulmaz kalir."""
     con = duckdb.connect()
+    _mem_limit_mb = _detect_safe_memory_limit_mb()
+    if _mem_limit_mb:
+        con.execute(f"PRAGMA memory_limit='{_mem_limit_mb}MB'")
     safe_path = str(db_path).replace("'", "''")
     con.execute(f"ATTACH '{safe_path}' AS src (READ_ONLY)")
     con.execute(f"CREATE VIEW {TABLE} AS SELECT * FROM src.{TABLE}")
