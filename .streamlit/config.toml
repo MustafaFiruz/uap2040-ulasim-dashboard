@@ -1,5 +1,16 @@
 [server]
-maxUploadSize = 20000
+# ONEMLI (gercek bir bulut dagitiminda olculup dogrulandi): "Dosya Yukle"
+# (tarayici uzerinden) modu, secilen dosyayi TAMAMEN Streamlit'in kendi
+# sunucu-tarafi BELLEK arabellegine yukler - bu, app.py'nin DuckDB icin
+# uyguladigi bellek sinirindan (bkz. data_io._detect_safe_memory_limit_mb)
+# TAMAMEN BAGIMSIZ ve ONCEKI bir asamadir; asirtilirsa konteyner OOM-kill
+# ile COKER (245MB, 5700 sutunlu bir dosyada dogrulandi - TUM uygulama,
+# o an baglı TUM kullanicilar icin coktu). GERCEK buyuk dosyalar icin
+# zaten "Dosya Yolu Gir" modu var ve o mod DOSYAYI HICBIR ZAMAN belleğe
+# tam yuklemez (DuckDB diskten parca parca okur) - bu yuzden bu sinir
+# SADECE tarayici-yukleme yolunu etkiler, yerel "buyuk dosya" testleri
+# (hep "Dosya Yolu Gir" ile yapildi) HICBIR SEKILDE kisitlanmaz.
+maxUploadSize = 200
 maxMessageSize = 2000
 enableXsrfProtection = true
 runOnSave = false
