@@ -176,16 +176,26 @@ def _ensure_utf8(path: str, cache_key: str) -> tuple[str, str | None]:
 WIDE_FILE_COL_THRESHOLD = 300  # bu sutun sayisini asan dosyalarda tip algilama atlanir
 
 
-def _peek_column_count(path: str) -> int:
-    """Sadece BASLIK satirini okuyup yaklasik sutun sayisini tahmin eder -
-    tam bir CSV ayristirmasi yapmadan, cok ucuz (milisaniyeler) bir on-kontrol.
-    Ayrac henuz bilinmedigi icin en yaygin adaylardan en cok bolen kazanir."""
+def _peek_header(path: str) -> tuple[int, str | None]:
+    """Sadece BASLIK satirini okuyup (yaklasik sutun sayisi, en olasi ayrac)
+    ciftini dondurur - tam bir CSV ayristirmasi yapmadan, cok ucuz
+    (milisaniyeler) bir on-kontrol. Ayrac adaylarindan (basliktaki) EN COK
+    gecen kazanir; sonraki ADIMLARDA (hem 'genis dosya' esigi HEM DE
+    DuckDB'nin GERCEK sonucunu dogrulamak icin) tekrar kullanilir."""
     try:
         with open(path, "rb") as f:
             first_line = f.readline()
-        return max((first_line.count(d) for d in (b";", b",", b"\t", b"|")), default=0) + 1
     except OSError:
-        return 0
+        return 0, None
+    candidates = {d: first_line.count(d) for d in (b";", b",", b"\t", b"|")}
+    best_delim, best_count = max(candidates.items(), key=lambda kv: kv[1])
+    if best_count == 0:
+        return 1, None
+    return best_count + 1, best_delim.decode("ascii")
+
+
+def _peek_column_count(path: str) -> int:
+    return _peek_header(path)[0]
 
 
 def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
@@ -204,7 +214,26 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
     # zaten SQL katmaninda (bkz. analytics.numeric_expr/cat_expr) icerige
     # bakarak dogru sekilde yapildigindan bu kisayoldan hicbir dogruluk
     # kaybi olmaz - sadece DuckDB'nin gereksiz on-analizi atlanir.
-    wide = _peek_column_count(path) > WIDE_FILE_COL_THRESHOLD
+    expected_cols, likely_delim = _peek_header(path)
+    wide = expected_cols > WIDE_FILE_COL_THRESHOLD
+
+    # DOGRULUK ICIN KRITIK (gercek bir bulut dagitiminda olculup
+    # dogrulandi): asagidaki denemelerin "n > 0 and ncol > 1" kontrolu TEK
+    # BASINA yeterli DEGIL - DuckDB'nin PARALEL CSV okuyucusu, bazi
+    # ortamlarda (farkli is parcacigi sayisi/DuckDB surumu) genis bir
+    # dosyayi YANLIS bol/birlestirip GECERLI ama YANLIS bir tablo
+    # uretebiliyor (gercek bir kullanicida: basliktaki 5.699 sutun yerine
+    # SADECE 22 sutun, TUM basliklarin tek bir alana birlesmesi - hata
+    # FIRLATILMADAN, "basarili" gibi gorunerek). Bu yuzden HER denemenin
+    # sonucu, basliktan ucuza tahmin edilen GERCEK sutun sayisiyla
+    # (expected_cols) karsilastirilarak DOGRULANIR; belirgin sekilde daha
+    # az sutun cikarsa (kirpilmis/tirnakli alanlar nedeniyle KUCUK
+    # sapmalara izin verilir) bu deneme BASARISIZ sayilip bir SONRAKI
+    # (daha guvenilir) yonteme gecilir.
+    def _plausible(ncol: int) -> bool:
+        if expected_cols <= 1:
+            return ncol > 1
+        return ncol >= max(2, int(expected_cols * 0.9))
 
     attempts = []
     if not wide:
@@ -217,7 +246,7 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
             con.execute(f"CREATE TABLE {TABLE} AS SELECT * FROM read_csv_auto(?, {opt_str})", [path])
             n = con.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0]
             ncol = len(con.execute(f"DESCRIBE {TABLE}").fetchdf())
-            if n > 0 and ncol > 1:
+            if n > 0 and ncol > 1 and _plausible(ncol):
                 if opts.get("all_varchar"):
                     if wide:
                         warnings.append(
@@ -235,7 +264,9 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
             last_err = e
             continue
 
-    # 2) farkli ayraclari acikca dene (otomatik tespit yanildiysa)
+    # 2) farkli ayraclari acikca dene (otomatik tespit yanildiysa) - basliktan
+    # tahmin edilen 'likely_delim' ILK sirada denenir (en yuksek basari
+    # ihtimali), sonra genel liste.
     #
     # PERFORMANS/DOGRULUK ICIN KRITIK (gercek bir dosyada olculup
     # dogrulandi): read_csv_auto (yukaridaki 1. deneme) varsayilan olarak
@@ -243,14 +274,12 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
     # "parallel=true" ACIKCA verilmezse TEK IS PARCACIGIYLA okur. Gercek
     # 5.699 sutunlu bir dosyada bu fark, "TAMAMLANMA suresi" acisindan
     # ~29 SANIYE (parallel=true ile) ile ~2+ SAAT (parallel=true OLMADAN)
-    # arasinda kaldi. Bulut ortaminda (Streamlit Community Cloud) bu
-    # kadar uzun bir istek, sunucu/baglanti zaman asimina ugrayip yariya
-    # kalmis/BOZUK bir tablo (gercek bir kullanicida: 5.699 yerine SADECE
-    # 22 sutun, basliklarin TEK bir alana birlesmesi) olarak
-    # gorunuyordu - kullanicinin kendi gozlemiyle yakalandi. "parallel=true"
-    # olmadan bu yedek yol PRATIKTE hicbir zaman guvenilir sekilde
-    # calismiyordu.
-    for delim in _DELIMS:
+    # arasinda kaldi.
+    delims_to_try = list(_DELIMS)
+    if likely_delim and likely_delim in delims_to_try:
+        delims_to_try.remove(likely_delim)
+        delims_to_try.insert(0, likely_delim)
+    for delim in delims_to_try:
         try:
             con.execute("DROP TABLE IF EXISTS " + TABLE)
             kwargs = ["ignore_errors=true", "null_padding=true", "all_varchar=true", "parallel=true"]
@@ -259,7 +288,7 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
             con.execute(f"CREATE TABLE {TABLE} AS SELECT * FROM read_csv(?, {opt_str})", [path])
             n = con.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0]
             ncol = len(con.execute(f"DESCRIBE {TABLE}").fetchdf())
-            if n > 0 and ncol > 1:
+            if n > 0 and ncol > 1 and _plausible(ncol):
                 warnings.append(
                     f"Dosya '{delim or 'otomatik'}' ayraciyla, tum sutunlar metin olarak "
                     f"okunarak yuklendi (guvenli mod)."
@@ -269,11 +298,37 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
             last_err = e
             continue
 
-    # 3) Son care: pandas ile parca parca (chunk) okuyup DuckDB tablosuna aktar
+    # 2b) DuckDB'nin (paralel okuyucudaki olasi tutarsizlik nedeniyle) hicbir
+    # denemede TUTARLI/DOGRU sutun sayisi uretemedigi durumlar icin - TEK IS
+    # PARCACIGIYLA (parallel=false), en yuksek olasilikli ayracla SON bir kez
+    # dene. Bu daha YAVAS olabilir ama DuckDB'nin paralel bolme mantigindaki
+    # olasi tutarsizligi devre disi birakir.
+    if likely_delim:
+        try:
+            con.execute("DROP TABLE IF EXISTS " + TABLE)
+            opt_str = (f"delim='{likely_delim}', ignore_errors=true, null_padding=true, "
+                       f"all_varchar=true, parallel=false")
+            con.execute(f"CREATE TABLE {TABLE} AS SELECT * FROM read_csv(?, {opt_str})", [path])
+            n = con.execute(f"SELECT COUNT(*) FROM {TABLE}").fetchone()[0]
+            ncol = len(con.execute(f"DESCRIBE {TABLE}").fetchdf())
+            if n > 0 and ncol > 1 and _plausible(ncol):
+                warnings.append(
+                    f"Dosya '{likely_delim}' ayraciyla (tek is parcacigi, yavas ama guvenli mod) "
+                    f"tum sutunlar metin olarak okunarak yuklendi."
+                )
+                return warnings
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+
+    # 3) Son care: pandas ile parca parca (chunk) okuyup DuckDB tablosuna
+    # aktar - 'likely_delim' basliktan zaten tahmin edildiyse ACIKCA
+    # kullanilir (sep=None'un kendi otomatik tespiti, cok genis/uzun satirli
+    # dosyalarda GUVENILMEZ olabilir - onceden yasanmis bir sorun).
     try:
         con.execute("DROP TABLE IF EXISTS " + TABLE)
         first = True
-        reader = pd.read_csv(path, encoding="utf-8", sep=None, engine="python",
+        reader = pd.read_csv(path, encoding="utf-8", sep=(likely_delim or None),
+                              engine="python" if not likely_delim else "c",
                               dtype=str, chunksize=100_000, on_bad_lines="skip")
         for chunk in reader:
             if first:
