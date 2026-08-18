@@ -208,8 +208,8 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
 
     attempts = []
     if not wide:
-        attempts.append(dict(auto_detect=True, ignore_errors=True, null_padding=True))
-    attempts.append(dict(auto_detect=True, ignore_errors=True, null_padding=True, all_varchar=True))
+        attempts.append(dict(auto_detect=True, ignore_errors=True, null_padding=True, parallel=True))
+    attempts.append(dict(auto_detect=True, ignore_errors=True, null_padding=True, all_varchar=True, parallel=True))
     for opts in attempts:
         try:
             con.execute("DROP TABLE IF EXISTS " + TABLE)
@@ -236,10 +236,24 @@ def _try_ingest(con: duckdb.DuckDBPyConnection, path: str) -> list[str]:
             continue
 
     # 2) farkli ayraclari acikca dene (otomatik tespit yanildiysa)
+    #
+    # PERFORMANS/DOGRULUK ICIN KRITIK (gercek bir dosyada olculup
+    # dogrulandi): read_csv_auto (yukaridaki 1. deneme) varsayilan olarak
+    # PARALEL okuma kullanirken, DUZ read_csv BUNU OTOMATIK YAPMAZ -
+    # "parallel=true" ACIKCA verilmezse TEK IS PARCACIGIYLA okur. Gercek
+    # 5.699 sutunlu bir dosyada bu fark, "TAMAMLANMA suresi" acisindan
+    # ~29 SANIYE (parallel=true ile) ile ~2+ SAAT (parallel=true OLMADAN)
+    # arasinda kaldi. Bulut ortaminda (Streamlit Community Cloud) bu
+    # kadar uzun bir istek, sunucu/baglanti zaman asimina ugrayip yariya
+    # kalmis/BOZUK bir tablo (gercek bir kullanicida: 5.699 yerine SADECE
+    # 22 sutun, basliklarin TEK bir alana birlesmesi) olarak
+    # gorunuyordu - kullanicinin kendi gozlemiyle yakalandi. "parallel=true"
+    # olmadan bu yedek yol PRATIKTE hicbir zaman guvenilir sekilde
+    # calismiyordu.
     for delim in _DELIMS:
         try:
             con.execute("DROP TABLE IF EXISTS " + TABLE)
-            kwargs = ["ignore_errors=true", "null_padding=true", "all_varchar=true"]
+            kwargs = ["ignore_errors=true", "null_padding=true", "all_varchar=true", "parallel=true"]
             kwargs.append(f"delim='{delim}'" if delim is not None else "auto_detect=true")
             opt_str = ", ".join(kwargs)
             con.execute(f"CREATE TABLE {TABLE} AS SELECT * FROM read_csv(?, {opt_str})", [path])
