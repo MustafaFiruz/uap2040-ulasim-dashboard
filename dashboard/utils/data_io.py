@@ -54,9 +54,9 @@ TABLE = "raw_data"
 _MAX_CACHE_BYTES = 3 * 1024 ** 3  # 3 GB - cogu bulut konteynerinde guvenli bir tavan
 
 
-def _prune_cache_if_too_large(max_bytes: int = _MAX_CACHE_BYTES) -> None:
+def _prune_dir_if_too_large(directory: Path, max_bytes: int) -> None:
     try:
-        entries = [(p, p.stat().st_size, p.stat().st_mtime) for p in CACHE_DIR.glob("*") if p.is_file()]
+        entries = [(p, p.stat().st_size, p.stat().st_mtime) for p in directory.rglob("*") if p.is_file()]
     except OSError:
         return
     total = sum(size for _, size, _ in entries)
@@ -74,7 +74,48 @@ def _prune_cache_if_too_large(max_bytes: int = _MAX_CACHE_BYTES) -> None:
             continue
 
 
+def _prune_cache_if_too_large(max_bytes: int = _MAX_CACHE_BYTES) -> None:
+    _prune_dir_if_too_large(CACHE_DIR, max_bytes)
+
+
+# DUCKDB_TEMP_DIR: DuckDB'nin bellek sinirini astigi sorgularda "taşma"
+# (spill) icin kullandigi dizin. KARARLILIK ICIN KRITIK (bu OTURUMDA
+# YERELDE olculup dogrulandi): bu dizin ACIKCA belirtilmezse DuckDB
+# VARSAYILAN olarak calisma dizinine gore ".tmp" adinda bir klasor
+# olusturup KULLANICIYA/UYGULAMAYA HICBIR SEKILDE gorunmeden, HICBIR
+# OTOMATIK TEMIZLIK olmadan buraya spill dosyalari biriktirir - tekrar
+# tekrar buyuk/genis dosya islendikce (bu proje TAM OLARAK boyle
+# kullanilmak icin tasarlandi) bu dizin ONBELLEK (CACHE_DIR) HARICINDE,
+# TAMAMEN GORUNMEZ sekilde konteynerin butun diskini doldurabiliyor -
+# aynı oturumda SADECE test amacli islenen dosyalardan bu klasor 86 GB'a
+# ulasti. Disk dolunca uygulama daha ACILMADAN "Oh no, Error running
+# app" ile cokuyor, "Reboot app" da KALICI COZMUYOR (ayni dolu disk
+# duruyor) - CACHE_DIR'i budamak TEK BASINA YETERSIZDI, cunku asil
+# sisen yer BURASIYDI. Artik bu dizin ACIKCA CACHE_DIR icine alinip
+# (boylece GORUNUR ve YONETILEBILIR hale gelip) HEM DuckDB'nin kendi
+# "max_temp_directory_size" siniriyla HEM DE ayni budama fonksiyonuyla
+# kontrol altina alinir.
+DUCKDB_TEMP_DIR = CACHE_DIR / "duckdb_spill"
+DUCKDB_TEMP_DIR.mkdir(parents=True, exist_ok=True)
+_MAX_SPILL_BYTES = 2 * 1024 ** 3  # 2 GB
+
+
+def configure_duckdb_temp(con: "duckdb.DuckDBPyConnection") -> None:
+    """HER DuckDB baglantisinda (hem ingest hem calisma baglantilari)
+    cagrilmalidir - taşma dizinini GORUNUR/YONETILEBILIR bir yere sabitler
+    ve DuckDB'nin KENDI tarafinda da bir ust sinir tanimlar (asilirsa
+    DuckDB yakalanabilir bir hata firlatir - OS'in diski doldurup
+    KONTEYNERI COKERTMESI yerine)."""
+    safe_path = str(DUCKDB_TEMP_DIR).replace("'", "''")
+    con.execute(f"PRAGMA temp_directory='{safe_path}'")
+    try:
+        con.execute(f"PRAGMA max_temp_directory_size='{_MAX_SPILL_BYTES // (1024 ** 2)}MB'")
+    except Exception:  # noqa: BLE001
+        pass  # eski DuckDB surumlerinde bu PRAGMA olmayabilir - sessizce atla
+
+
 _prune_cache_if_too_large()
+_prune_dir_if_too_large(DUCKDB_TEMP_DIR, _MAX_SPILL_BYTES)
 
 # CSV ayristirma sirasinda denenecek ayraclar (sirayla denenir)
 _DELIMS = [None, ",", ";", "\t", "|"]  # None -> duckdb otomatik tespit etsin
@@ -416,6 +457,7 @@ def get_or_build(path: str, force_rebuild: bool = False) -> DataSource:
     con = duckdb.connect(str(db_path))
     try:
         con.execute("PRAGMA threads=4")
+        configure_duckdb_temp(con)
         _mem_limit_mb = _detect_safe_memory_limit_mb()
         if _mem_limit_mb:
             con.execute(f"PRAGMA memory_limit='{_mem_limit_mb}MB'")
@@ -434,6 +476,7 @@ def get_or_build(path: str, force_rebuild: bool = False) -> DataSource:
     meta = {"total_rows": total, "columns": columns, "dtypes": dtypes, "warnings": warnings}
     meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     _prune_cache_if_too_large()  # bkz. modul basindaki ayni fonksiyonun notu
+    _prune_dir_if_too_large(DUCKDB_TEMP_DIR, _MAX_SPILL_BYTES)
 
     return DataSource(
         db_path=str(db_path), total_rows=total, columns=columns, dtypes=dtypes,
@@ -490,6 +533,7 @@ def open_work_connection(db_path: str) -> duckdb.DuckDBPyConnection:
     icin CREATE VIEW kullanabiliriz; asil onbellek dosyasi hep salt-okunur
     ve bozulmaz kalir."""
     con = duckdb.connect()
+    configure_duckdb_temp(con)
     _mem_limit_mb = _detect_safe_memory_limit_mb()
     if _mem_limit_mb:
         con.execute(f"PRAGMA memory_limit='{_mem_limit_mb}MB'")
