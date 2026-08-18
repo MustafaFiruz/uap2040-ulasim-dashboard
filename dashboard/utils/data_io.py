@@ -38,6 +38,44 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 TABLE = "raw_data"
 
+# KARARLILIK ICIN KRITIK (gercek bir bulut dagitiminda olculup dogrulandi):
+# CACHE_DIR'e her yeni yuklenen/islenen dosya icin kalici bir kopya (+
+# islenmis .duckdb onbellegi) birikiyordu - hicbir otomatik temizlik
+# olmadigi icin, ozellikle bu proje TEKRAR TEKRAR BUYUK dosyalarla
+# kullanildikca (ki proje BUYUK verilerle calismak uzere tasarlandi), bu
+# birikim konteynerin (sinirli) disk alanini TAMAMEN doldurabiliyor. Disk
+# dolunca uygulama artik YENI bir dosya yazamadigi icin, kullaniciya
+# ANLAMSIZ/ilgisiz bir hatayla (hatta bazen sayfa hic acilamadan "Oh no,
+# Error running app" ekraniyla) COKUYORDU - sorunun asil kaynagi (dolu
+# disk) hicbir yerde gorunmuyordu. Bu fonksiyon, HER modul yuklendiginde
+# (yani her uygulama baslangicinda) CACHE_DIR'i toplam boyuta gore
+# denetler; sinir asilirsa EN ESKI dosyalardan baslayarak sinirin altina
+# inene kadar siler - boylece disk hicbir zaman kontrolsuzce dolmaz.
+_MAX_CACHE_BYTES = 3 * 1024 ** 3  # 3 GB - cogu bulut konteynerinde guvenli bir tavan
+
+
+def _prune_cache_if_too_large(max_bytes: int = _MAX_CACHE_BYTES) -> None:
+    try:
+        entries = [(p, p.stat().st_size, p.stat().st_mtime) for p in CACHE_DIR.glob("*") if p.is_file()]
+    except OSError:
+        return
+    total = sum(size for _, size, _ in entries)
+    if total <= max_bytes:
+        return
+    # en eski (en son degistirilme zamani en kucuk) dosyadan basla
+    entries.sort(key=lambda e: e[2])
+    for p, size, _ in entries:
+        if total <= max_bytes:
+            break
+        try:
+            p.unlink()
+            total -= size
+        except OSError:
+            continue
+
+
+_prune_cache_if_too_large()
+
 # CSV ayristirma sirasinda denenecek ayraclar (sirayla denenir)
 _DELIMS = [None, ",", ";", "\t", "|"]  # None -> duckdb otomatik tespit etsin
 
@@ -395,6 +433,7 @@ def get_or_build(path: str, force_rebuild: bool = False) -> DataSource:
 
     meta = {"total_rows": total, "columns": columns, "dtypes": dtypes, "warnings": warnings}
     meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    _prune_cache_if_too_large()  # bkz. modul basindaki ayni fonksiyonun notu
 
     return DataSource(
         db_path=str(db_path), total_rows=total, columns=columns, dtypes=dtypes,
@@ -435,6 +474,7 @@ def materialize_upload(uploaded_file) -> str:
     if needs_write:
         with open(tmp_path, "wb") as f:
             f.write(uploaded_file.getvalue())
+        _prune_cache_if_too_large()  # bkz. modul basindaki ayni fonksiyonun notu
     return str(tmp_path)
 
 
