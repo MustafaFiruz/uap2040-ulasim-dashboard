@@ -55,7 +55,7 @@ st.set_page_config(page_title="UAP 2040 Tarzi Ulasim Veri Dashboard'u",
 # Asagidaki kucuk script bunu otomatiklestirir: sidebar birkac saniye icinde
 # gelmezse sayfayi TEK SEFERLIK kendiliginden yeniler (sonsuz donguyu
 # sessionStorage bayragiyla onler).
-st.components.v1.html(
+st.iframe(
     """
     <script>
     (function () {
