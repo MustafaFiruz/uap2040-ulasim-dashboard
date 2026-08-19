@@ -42,40 +42,13 @@ from utils import mapping as mapping_mod
 st.set_page_config(page_title="UAP 2040 Tarzi Ulasim Veri Dashboard'u",
                     page_icon="🚌", layout="wide")
 
-# ---------------------------------------------------------- sidebar watchdog
-# Streamlit Community Cloud'da (ozellikle soguk baslangicta / ilk baglantida)
-# proxy katmani bazen ilk render'daki delta paketlerinden bir kismini
-# (ozellikle sidebar'i olusturan ADD_BLOCK mesajini) kaybediyor: script
-# sunucu tarafinda sorunsuz calisip bitiyor ("notRunning"/"CONNECTED") ama
-# tarayicida st.sidebar hic cizilmiyor - sonuc: kullanici veri kaynagi
-# secimini, sutun eslestirme butonlarini vs. goremiyor. Bu SADECE deployed
-# site uzerinde gorulur (yerel `streamlit run` dogrudan baglanip bu proxy
-# katmanindan gecmedigi icin hicbir zaman tetiklenmez) ve bir kez sayfa
-# yenilenince (yeni delta seti gonderildigi icin) kendiliginden duzeliyor.
-# Asagidaki kucuk script bunu otomatiklestirir: sidebar birkac saniye icinde
-# gelmezse sayfayi TEK SEFERLIK kendiliginden yeniler (sonsuz donguyu
-# sessionStorage bayragiyla onler).
-st.iframe(
-    """
-    <script>
-    (function () {
-        try {
-            var parentDoc = window.parent.document;
-            var storage = window.parent.sessionStorage;
-            var already = storage.getItem('uap2040_sidebar_watchdog_retried');
-            setTimeout(function () {
-                var sidebar = parentDoc.querySelector('[data-testid="stSidebar"]');
-                if (!sidebar && !already) {
-                    storage.setItem('uap2040_sidebar_watchdog_retried', '1');
-                    window.parent.location.reload();
-                }
-            }, 3000);
-        } catch (e) { /* sessiz gec - kritik olmayan bir iyilestirme */ }
-    })();
-    </script>
-    """,
-    height=1,
-)
+# NOT: Daha once burada, Streamlit Community Cloud'un ilk baglantida sidebar'i
+# kaybetmesini telafi eden bir "watchdog" (otomatik tek seferlik sayfa
+# yenileme) denendi. Kaldirildi: her ziyarette script'i sunucu tarafinda IKI
+# KEZ calistirdigi icin (ilk yukleme + otomatik yenileme), zaten kisitli olan
+# 1GB RAM'i ekstra zorlayip cokme/"connection reset" durumuna katkida
+# bulunuyor olabilirdi. Eger sol menu (Veri Kaynagi) ilk acilista gorunmezse,
+# sayfayi elle bir kez yenilemek yeterli.
 
 PALETTE = px.colors.qualitative.Set2
 
