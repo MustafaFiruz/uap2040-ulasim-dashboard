@@ -414,6 +414,38 @@ def household_size_stats(con, table, mapping: dict) -> pd.DataFrame | None:
     return None
 
 
+def repeated_value_consistency(con, table, key_col: str | None, value_col: str | None) -> dict | None:
+    """Bir alanin (orn. hanehalki buyuklugu, gelir) ayni anahtar (orn.
+    hane_id) icindeki TUM satirlarda TUTARLI olup olmadigini kontrol eder.
+    Anket disa aktarimlarinda hane/kisi duzeyindeki alanlar HER satirda
+    tekrarlanir (denormalize edilmis) - eger bu deger ayni anahtar icin
+    satirdan satira DEGISIYORSA, ya veri kalitesi sorunu ya da SUTUN
+    ESLESTIRMESI YANLIS (secilen sutun aslinda o kavramla ayni sey degil,
+    orn. 'hanehalki buyuklugu' sanilan bir sutun aslinda 'kisinin hane
+    icindeki sira numarasi' olabilir) demektir. _dedup_source() boyle bir
+    durumda CATIRDAMAZ (ANY_VALUE ile rastgele ama tutarli bir deger
+    secer, sayimi asla sismez) - ama kullaniciyi bundan haberdar etmek
+    DOGRULUK acisindan onemlidir, bu yuzden ayri bir kontrol fonksiyonu."""
+    if not key_col or not value_col:
+        return None
+    k, v = ident(key_col), ident(value_col)
+    row = con.execute(f"""
+        WITH per_key AS (
+            SELECT {k} AS key_, COUNT(DISTINCT {v}) AS n_distinct
+            FROM {table} WHERE {k} IS NOT NULL AND {v} IS NOT NULL
+            GROUP BY 1
+        )
+        SELECT COUNT(*) AS n_keys,
+               SUM(CASE WHEN n_distinct > 1 THEN 1 ELSE 0 END) AS n_inconsistent
+        FROM per_key
+    """).fetchone()
+    if row is None or not row[0]:
+        return None
+    n_keys, n_inconsistent = row[0], row[1] or 0
+    return {"n_keys": n_keys, "n_inconsistent": n_inconsistent,
+            "pct": 100 * n_inconsistent / n_keys}
+
+
 def household_size_by_district(con, table, mapping: dict) -> pd.DataFrame | None:
     if not mapping.get("district"):
         return None
