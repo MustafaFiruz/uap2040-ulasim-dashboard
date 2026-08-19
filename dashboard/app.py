@@ -74,7 +74,7 @@ st.iframe(
     })();
     </script>
     """,
-    height=0,
+    height=1,
 )
 
 PALETTE = px.colors.qualitative.Set2
